@@ -1635,7 +1635,7 @@ async def send_daily_notifications(context: ContextTypes.DEFAULT_TYPE):
                 # Отправляем отдельно от ежедневных уведомлений, только один раз в день
                 if current_time == "15:00" and user.notify_phase_start:
                     # Проверяем, не отправляли ли уже уведомление о приближении фазы сегодня
-                        if not user.last_phase_advance_date or user.last_phase_advance_date != date.today():
+                    if not user.last_phase_advance_date or user.last_phase_advance_date != date.today():
                         calculator = CycleCalculator(
                             user.last_period_start,
                             effective_cycle_length_for_user(user),
