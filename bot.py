@@ -24,6 +24,7 @@ from database import (
     get_last_cycle_record,
     update_cycle_record_actual_end,
     get_effective_cycle_length,
+    reset_user_and_cycle_data,
 )
 from cycle_calculator import (
     CycleCalculator,
@@ -174,6 +175,15 @@ def effective_cycle_length_for_user(user: User) -> int:
     return get_effective_cycle_length(user.id, user.cycle_length or 28)
 
 
+def get_user_today(user: User) -> date:
+    """Текущая дата в часовом поясе пользователя (для проверки «сегодня» / «в будущем»)."""
+    msk_tz = pytz.timezone("Europe/Moscow")
+    msk_now = datetime.now(msk_tz)
+    offset = get_timezone_offset(user)
+    user_now = msk_now + timedelta(hours=offset)
+    return user_now.date()
+
+
 def get_persistent_reply_keyboard() -> ReplyKeyboardMarkup:
     """Постоянная клавиатура: Главное меню и Перезапуск (не в сообщении, а в интерфейсе)."""
     return ReplyKeyboardMarkup(
@@ -191,14 +201,11 @@ def get_main_menu(user: User) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🚀 Приступить к работе", callback_data="start_data_collection")]
         ]
     else:
-        # Порядок: 1. Мой профиль, 2. Настройка уведомлений, 3. Обновить дату / Цикл закончился раньше, 4. Объяснение фаз, 5. Заполнить заново
+        # Порядок: 1. Мой профиль, 2. Настройка уведомлений, 3. Обновить дату цикла, 4. Объяснение фаз, 5. Заполнить заново
         keyboard = [
             [InlineKeyboardButton("👤 Мой профиль", callback_data="profile")],
             [InlineKeyboardButton("🔔 Настройка уведомлений", callback_data="notification_settings")],
-            [
-                InlineKeyboardButton("📆 Обновить дату начала цикла", callback_data="update_cycle_date"),
-                InlineKeyboardButton("⏪ Цикл закончился раньше", callback_data="cycle_ended_earlier"),
-            ],
+            [InlineKeyboardButton("📆 Обновить дату цикла / цикл закончился раньше", callback_data="update_cycle_choice")],
             [InlineKeyboardButton("📚 Объяснение фаз цикла", callback_data="cycle_info")],
             [InlineKeyboardButton("🔄 Заполнить данные заново", callback_data="start_data_collection")],
         ]
@@ -272,7 +279,48 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = session.query(User).filter(User.id == user_id).first()
         
         if query.data == "start_data_collection":
+            # Если уже есть данные — предупреждение и подтверждение перед удалением
+            if user.last_period_start is not None or user.name:
+                await query.answer()
+                await query.edit_message_text(
+                    "⚠️ **Вы уверены?**\n\n"
+                    "При перезаполнении все данные по предыдущим циклам и вашему профилю будут удалены из базы. "
+                    "Это действие нельзя отменить.\n\n"
+                    "Продолжить?",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("✅ Да, перезаполнить", callback_data="confirm_refill_data")],
+                        [InlineKeyboardButton("❌ Отмена", callback_data="cancel_refill_data")],
+                    ]),
+                    parse_mode="Markdown"
+                )
+            else:
+                await start_data_collection(query, user, session)
+        elif query.data == "confirm_refill_data":
+            await query.answer()
+            user_id = query.from_user.id
+            reset_user_and_cycle_data(session, user_id)
+            user = session.query(User).filter(User.id == user_id).first()
             await start_data_collection(query, user, session)
+        elif query.data == "cancel_refill_data":
+            await query.answer()
+            await query.edit_message_text(
+                "👋 Главное меню",
+                reply_markup=get_main_menu(user)
+            )
+        elif query.data == "update_cycle_choice":
+            await query.answer()
+            await query.edit_message_text(
+                "📆 **Обновить дату цикла**\n\n"
+                "Выберите вариант:\n\n"
+                "• **Цикл закончился раньше** — сначала укажете дату окончания текущего цикла, затем дату начала нового.\n\n"
+                "• **Цикл завершился вовремя** — укажете только дату начала нового цикла.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⏪ Цикл закончился раньше", callback_data="cycle_ended_earlier")],
+                    [InlineKeyboardButton("📆 Обновить дату начала цикла", callback_data="update_cycle_date")],
+                    [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")],
+                ]),
+                parse_mode="Markdown"
+            )
         elif query.data == "fill_later":
             # Обработка кнопки "Заполнить позже" - не через ConversationHandler
             await query.answer()
@@ -322,7 +370,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Обрабатывается ConversationHandler (start_update_cycle_date_handler)
             pass
         elif query.data == "cycle_ended_earlier":
-            # Обрабатывается ConversationHandler (cycle_ended_earlier)
+            # Обрабатывается ConversationHandler (start_cycle_ended_earlier_handler)
             pass
         elif query.data == "cycle_not_ended_on_time":
             await query.answer()
@@ -393,8 +441,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Нажмите кнопку ниже, чтобы обновить дату начала нового цикла:"
             )
             keyboard = [
-                [InlineKeyboardButton("📆 Обновить дату начала цикла", callback_data="update_cycle_date")],
-                [InlineKeyboardButton("⏪ Цикл закончился раньше", callback_data="cycle_ended_earlier")],
+                [InlineKeyboardButton("📆 Обновить дату цикла / цикл закончился раньше", callback_data="update_cycle_choice")],
                 [InlineKeyboardButton("⏳ Цикл не завершился вовремя", callback_data="cycle_not_ended_on_time")],
                 [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
             ]
@@ -492,15 +539,21 @@ async def update_cycle_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return UPDATING_NEW_CYCLE_DATE
 
-        # Проверяем, что дата не в будущем
-        if new_period_date > date.today():
+        user = session.query(User).filter(User.id == user_id).first()
+        if not user:
+            await update.message.reply_text("❌ Пользователь не найден. Отправьте /start")
+            return ConversationHandler.END
+        user_today = get_user_today(user)
+
+        # Проверяем, что дата не в будущем (по часовому поясу пользователя)
+        if new_period_date > user_today:
             await update.message.reply_text(
-                "⚠️ Дата не может быть в будущем. Введите корректную дату:"
+                "⚠️ Дата не может быть в будущем. Введите корректную дату (учитывается ваш часовой пояс):"
             )
             return UPDATING_NEW_CYCLE_DATE
 
         # При обновлении цикла разрешаем дату до 14 дней назад (пользователь мог обновить с задержкой)
-        days_diff = (date.today() - new_period_date).days
+        days_diff = (user_today - new_period_date).days
         if days_diff > 14:
             await update.message.reply_text(
                 "⚠️ Дата слишком старая. Укажите дату начала менструации не более чем 14 дней назад. "
@@ -508,10 +561,6 @@ async def update_cycle_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return UPDATING_NEW_CYCLE_DATE
 
-        user = session.query(User).filter(User.id == user_id).first()
-        if not user:
-            await update.message.reply_text("❌ Пользователь не найден. Отправьте /start")
-            return ConversationHandler.END
         user.last_period_start = new_period_date
         user.cycle_extended_days = 0  # сброс продления при обновлении даты нового цикла
         session.commit()
@@ -586,16 +635,17 @@ async def handle_cycle_end_date(update: Update, context: ContextTypes.DEFAULT_TY
             )
             return COLLECTING_CYCLE_END_DATE
 
-        if end_date > date.today():
-            await update.message.reply_text(
-                "⚠️ Дата окончания не может быть в будущем. Введите корректную дату:"
-            )
-            return COLLECTING_CYCLE_END_DATE
-
         user = session.query(User).filter(User.id == user_id).first()
         if not user or not user.last_period_start:
             await update.message.reply_text("❌ Сначала заполните данные профиля.")
             return ConversationHandler.END
+        user_today = get_user_today(user)
+        if end_date > user_today:
+            await update.message.reply_text(
+                "⚠️ Дата окончания не может быть в будущем. Введите корректную дату (учитывается ваш часовой пояс):"
+            )
+            return COLLECTING_CYCLE_END_DATE
+
         if end_date < user.last_period_start:
             await update.message.reply_text(
                 "⚠️ Дата окончания цикла не может быть раньше даты начала цикла "
@@ -608,7 +658,7 @@ async def handle_cycle_end_date(update: Update, context: ContextTypes.DEFAULT_TY
             last_record = get_last_cycle_record(user_id)
             if not last_record:
                 await update.message.reply_text(
-                    "❌ В истории нет записи текущего цикла. Сначала обновите дату начала цикла через «Обновить дату начала цикла»."
+                    "❌ В истории нет записи текущего цикла. Сначала обновите дату цикла через «Обновить дату цикла»."
                 )
                 return ConversationHandler.END
             await update.message.reply_text("❌ Не удалось сохранить дату окончания. Попробуйте позже.")
@@ -1693,8 +1743,7 @@ async def send_daily_notifications(context: ContextTypes.DEFAULT_TYPE):
                                 f"Нажмите кнопку ниже, чтобы обновить дату начала нового цикла:"
                             )
                             keyboard = [
-                                [InlineKeyboardButton("📆 Обновить дату начала цикла", callback_data="update_cycle_date")],
-                                [InlineKeyboardButton("⏪ Цикл закончился раньше", callback_data="cycle_ended_earlier")],
+                                [InlineKeyboardButton("📆 Обновить дату цикла / цикл закончился раньше", callback_data="update_cycle_choice")],
                                 [InlineKeyboardButton("⏳ Цикл не завершился вовремя", callback_data="cycle_not_ended_on_time")],
                                 [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
                             ]
@@ -1824,8 +1873,7 @@ def main():
         )
         
         keyboard = [
-            [InlineKeyboardButton("📆 Обновить дату начала цикла", callback_data="update_cycle_date")],
-            [InlineKeyboardButton("⏪ Цикл закончился раньше", callback_data="cycle_ended_earlier")],
+            [InlineKeyboardButton("📆 Обновить дату цикла / цикл закончился раньше", callback_data="update_cycle_choice")],
             [InlineKeyboardButton("⏳ Цикл не завершился вовремя", callback_data="cycle_not_ended_on_time")],
             [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]
         ]

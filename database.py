@@ -304,3 +304,38 @@ def update_cycle_record_actual_end(user_id: int, cycle_actual_end_date) -> bool:
         return False
     finally:
         session.close()
+
+
+def reset_user_and_cycle_data(session, user_id: int) -> bool:
+    """
+    Удалить все записи циклов пользователя и сбросить данные профиля (для «Заполнить данные заново»).
+    Использует переданную сессию и выполняет commit.
+    """
+    try:
+        session.query(CycleRecord).filter(CycleRecord.user_id == user_id).delete()
+        user = session.query(User).filter(User.id == user_id).first()
+        if not user:
+            return False
+        user.name = None
+        user.girlfriend_name = None
+        user.cycle_length = 28
+        user.period_length = 5
+        user.last_period_start = None
+        user.cycle_extended_days = 0
+        user.data_collection_state = None
+        user.notification_time = "09:00"
+        user.timezone = 0
+        user.notifications_enabled = True
+        user.notify_daily = True
+        user.notify_phase_start = True
+        user.last_notification_date = None
+        user.last_phase_advance_date = None
+        user.pinned_message_id = None
+        user.days_with_notifications = 0
+        session.commit()
+        logger.info(f"Данные пользователя и циклов сброшены для user_id={user_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка сброса данных пользователя: {e}")
+        session.rollback()
+        return False
