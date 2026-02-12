@@ -501,11 +501,22 @@ async def start_update_cycle_date(query, user: User, session):
     keyboard = [
         [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
     ]
-    await query.edit_message_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
+    try:
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось отредактировать сообщение при обновлении даты цикла: {e}")
+        try:
+            await query.message.reply_text(
+                text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+        except Exception:
+            pass
     return UPDATING_NEW_CYCLE_DATE
 
 
@@ -1898,29 +1909,8 @@ def main():
         main_menu_fallback
     )
 
-    # ConversationHandler для сбора данных
-    conv_handler = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(begin_filling, pattern="^start_filling$")
-        ],
-        states={
-            COLLECTING_NAME: [_keyboard_fallback, MessageHandler(filters.TEXT & ~filters.COMMAND, collect_name)],
-            COLLECTING_GIRLFRIEND_NAME: [_keyboard_fallback, MessageHandler(filters.TEXT & ~filters.COMMAND, collect_girlfriend_name)],
-            COLLECTING_CYCLE_LENGTH: [_keyboard_fallback, MessageHandler(filters.TEXT & ~filters.COMMAND, collect_cycle_length)],
-            COLLECTING_PERIOD_LENGTH: [_keyboard_fallback, MessageHandler(filters.TEXT & ~filters.COMMAND, collect_period_length)],
-            COLLECTING_LAST_PERIOD: [_keyboard_fallback, MessageHandler(filters.TEXT & ~filters.COMMAND, collect_last_period)],
-            COLLECTING_TIMEZONE: [_keyboard_fallback, MessageHandler(filters.TEXT & ~filters.COMMAND, collect_timezone)],
-            COLLECTING_NOTIFICATION_TIME: [_keyboard_fallback, MessageHandler(filters.TEXT & ~filters.COMMAND, collect_notification_time)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        per_chat=True,
-        per_user=True,
-        per_message=False,
-    )
-    
-    application.add_handler(conv_handler)
-    
-    # ConversationHandler для изменения времени уведомлений
+    # Сначала регистрируем диалоги обновления цикла и смены времени, чтобы ввод даты/времени
+    # не перехватывался диалогом сбора данных (conv_handler)
     time_change_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(start_change_notification_time, pattern="^change_notification_time$")
@@ -1933,9 +1923,8 @@ def main():
         per_user=True,
         per_message=False,
     )
-    
     application.add_handler(time_change_handler)
-    
+
     # ConversationHandler для обновления даты начала нового цикла и «Цикл закончился раньше»
     async def start_update_cycle_date_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик для начала обновления даты цикла"""
@@ -1944,7 +1933,7 @@ def main():
         session = SessionLocal()
         try:
             user = session.query(User).filter(User.id == user_id).first()
-            await start_update_cycle_date(query, user, session)
+            return await start_update_cycle_date(query, user, session)
         finally:
             session.close()
 
@@ -2000,8 +1989,29 @@ def main():
         per_user=True,
         per_message=False,
     )
-    
     application.add_handler(cycle_update_handler)
+
+    # ConversationHandler для сбора данных
+    conv_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(begin_filling, pattern="^start_filling$")
+        ],
+        states={
+            COLLECTING_NAME: [_keyboard_fallback, MessageHandler(filters.TEXT & ~filters.COMMAND, collect_name)],
+            COLLECTING_GIRLFRIEND_NAME: [_keyboard_fallback, MessageHandler(filters.TEXT & ~filters.COMMAND, collect_girlfriend_name)],
+            COLLECTING_CYCLE_LENGTH: [_keyboard_fallback, MessageHandler(filters.TEXT & ~filters.COMMAND, collect_cycle_length)],
+            COLLECTING_PERIOD_LENGTH: [_keyboard_fallback, MessageHandler(filters.TEXT & ~filters.COMMAND, collect_period_length)],
+            COLLECTING_LAST_PERIOD: [_keyboard_fallback, MessageHandler(filters.TEXT & ~filters.COMMAND, collect_last_period)],
+            COLLECTING_TIMEZONE: [_keyboard_fallback, MessageHandler(filters.TEXT & ~filters.COMMAND, collect_timezone)],
+            COLLECTING_NOTIFICATION_TIME: [_keyboard_fallback, MessageHandler(filters.TEXT & ~filters.COMMAND, collect_notification_time)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        per_chat=True,
+        per_user=True,
+        per_message=False,
+    )
+    
+    application.add_handler(conv_handler)
     
     # Постоянные кнопки (Главное меню / Перезапуск) — когда пользователь не в диалоге
     application.add_handler(
